@@ -1,0 +1,101 @@
+name: Add Ready for QA Label to Linear
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  update-linear-ticket:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract Linear Ticket ID
+        id: extract-ticket
+        run: |
+          # Try to extract ticket ID from branch name (e.g., feature/ABC-123-description or ABC-123-description)
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          # Pattern matches common Linear ticket formats (e.g., ABC-123, TEAM-456)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oE '[A-Z]{2,10}-[0-9]+' | head -1)
+
+          # If not found in branch name, try PR title
+          if [ -z "$TICKET_ID" ]; then
+            TICKET_ID=$(echo "$PR_TITLE" | grep -oE '[A-Z]{2,10}-[0-9]+' | head -1)
+          fi
+
+          if [ -z "$TICKET_ID" ]; then
+            echo "No Linear ticket ID found in branch name or PR title"
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found ticket ID: $TICKET_ID"
+            echo "ticket_id=$TICKET_ID" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Add Ready for QA Label
+        if: steps.extract-ticket.outputs.found == 'true'
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          TICKET_ID: ${{ steps.extract-ticket.outputs.ticket_id }}
+        run: |
+          # First, get the issue ID from the ticket identifier
+          ISSUE_RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id team { labels { nodes { id name } } } labels { nodes { id name } } } }\"}" \
+            https://api.linear.app/graphql)
+
+          echo "Issue response: $ISSUE_RESPONSE"
+
+          # Extract issue UUID
+          ISSUE_UUID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.id')
+
+          if [ "$ISSUE_UUID" == "null" ] || [ -z "$ISSUE_UUID" ]; then
+            echo "Could not find Linear issue with ID: $TICKET_ID"
+            exit 1
+          fi
+
+          echo "Found issue UUID: $ISSUE_UUID"
+
+          # Check if "Ready for QA" label exists in the team
+          LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
+
+          if [ -z "$LABEL_ID" ] || [ "$LABEL_ID" == "null" ]; then
+            echo "Label 'Ready for QA' not found in team. Please create the label first."
+            exit 1
+          fi
+
+          echo "Found label ID: $LABEL_ID"
+
+          # Get current label IDs
+          CURRENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -r '[.data.issue.labels.nodes[].id] | join(",")')
+
+          # Add new label to existing labels
+          if [ -z "$CURRENT_LABELS" ]; then
+            ALL_LABELS="[\"$LABEL_ID\"]"
+          else
+            ALL_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c "[.data.issue.labels.nodes[].id] + [\"$LABEL_ID\"] | unique")
+          fi
+
+          echo "Updating issue with labels: $ALL_LABELS"
+
+          # Update the issue with the new label
+          UPDATE_RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "{\"query\": \"mutation { issueUpdate(id: \\\"$ISSUE_UUID\\\", input: { labelIds: $ALL_LABELS }) { success issue { id identifier labels { nodes { name } } } } }\"}" \
+            https://api.linear.app/graphql)
+
+          echo "Update response: $UPDATE_RESPONSE"
+
+          SUCCESS=$(echo "$UPDATE_RESPONSE" | jq -r '.data.issueUpdate.success')
+
+          if [ "$SUCCESS" == "true" ]; then
+            echo "Successfully added 'Ready for QA' label to $TICKET_ID"
+          else
+            echo "Failed to update issue"
+            exit 1
+          fi
