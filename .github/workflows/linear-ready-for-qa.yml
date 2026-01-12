@@ -82,11 +82,19 @@ jobs:
 
           echo "Updating issue with labels: $ALL_LABELS"
 
+          # Build the GraphQL query with proper JSON escaping using jq
+          QUERY=$(jq -n \
+            --arg issueId "$ISSUE_UUID" \
+            --argjson labelIds "$ALL_LABELS" \
+            '{query: "mutation UpdateIssue($issueId: String!, $labelIds: [String!]) { issueUpdate(id: $issueId, input: { labelIds: $labelIds }) { success issue { id identifier labels { nodes { name } } } } }", variables: {issueId: $issueId, labelIds: $labelIds}}')
+
+          echo "Request payload: $QUERY"
+
           # Update the issue with the new label
           UPDATE_RESPONSE=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d "{\"query\": \"mutation { issueUpdate(id: \\\"$ISSUE_UUID\\\", input: { labelIds: $ALL_LABELS }) { success issue { id identifier labels { nodes { name } } } } }\"}" \
+            -d "$QUERY" \
             https://api.linear.app/graphql)
 
           echo "Update response: $UPDATE_RESPONSE"
