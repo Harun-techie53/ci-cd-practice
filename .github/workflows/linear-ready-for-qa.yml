@@ -13,23 +13,30 @@ jobs:
     steps:
       - name: Extract Linear Ticket ID
         id: extract-ticket
+        env:
+          BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          # Try to extract ticket ID from branch name (e.g., feature/ABC-123-description or ABC-123-description)
-          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-          PR_TITLE="${{ github.event.pull_request.title }}"
-
-          # Pattern matches common Linear ticket formats (e.g., ABC-123, TEAM-456)
-          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oE '[A-Z]{2,10}-[0-9]+' | head -1)
+          # Pattern matches Linear ticket formats case-insensitively (e.g., REP-123, rep-123, Rep-456)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE '[a-z]{2,10}-[0-9]+' | head -1)
 
           # If not found in branch name, try PR title
           if [ -z "$TICKET_ID" ]; then
-            TICKET_ID=$(echo "$PR_TITLE" | grep -oE '[A-Z]{2,10}-[0-9]+' | head -1)
+            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE '[a-z]{2,10}-[0-9]+' | head -1)
+          fi
+
+          # If not found in PR title, try PR description/body
+          if [ -z "$TICKET_ID" ]; then
+            TICKET_ID=$(echo "$PR_BODY" | grep -oiE '[a-z]{2,10}-[0-9]+' | head -1)
           fi
 
           if [ -z "$TICKET_ID" ]; then
-            echo "No Linear ticket ID found in branch name or PR title"
+            echo "No Linear ticket ID found in branch name, PR title, or PR description"
             echo "found=false" >> $GITHUB_OUTPUT
           else
+            # Convert to uppercase for Linear API
+            TICKET_ID=$(echo "$TICKET_ID" | tr '[:lower:]' '[:upper:]')
             echo "Found ticket ID: $TICKET_ID"
             echo "ticket_id=$TICKET_ID" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
@@ -48,23 +55,21 @@ jobs:
             -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id team { labels { nodes { id name } } } labels { nodes { id name } } } }\"}" \
             https://api.linear.app/graphql)
 
-          echo "Issue response: $ISSUE_RESPONSE"
-
           # Extract issue UUID
-          ISSUE_UUID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.id')
+          ISSUE_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.id')
 
-          if [ "$ISSUE_UUID" == "null" ] || [ -z "$ISSUE_UUID" ]; then
+          if [ "$ISSUE_ID" == "null" ] || [ -z "$ISSUE_ID" ]; then
             echo "Could not find Linear issue with ID: $TICKET_ID"
             exit 1
           fi
 
-          echo "Found issue UUID: $ISSUE_UUID"
+          echo "Found issue ID: $ISSUE_ID"
 
           # Check if "Ready for QA" label exists in the team
           LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
 
           if [ -z "$LABEL_ID" ] || [ "$LABEL_ID" == "null" ]; then
-            echo "Label 'Ready for QA' not found in team. Please create the label first."
+            echo "Label 'Ready for QA' not found in team"
             exit 1
           fi
 
@@ -84,11 +89,9 @@ jobs:
 
           # Build the GraphQL query with proper JSON escaping using jq
           QUERY=$(jq -n \
-            --arg issueId "$ISSUE_UUID" \
+            --arg issueId "$ISSUE_ID" \
             --argjson labelIds "$ALL_LABELS" \
             '{query: "mutation UpdateIssue($issueId: String!, $labelIds: [String!]) { issueUpdate(id: $issueId, input: { labelIds: $labelIds }) { success issue { id identifier labels { nodes { name } } } } }", variables: {issueId: $issueId, labelIds: $labelIds}}')
-
-          echo "Request payload: $QUERY"
 
           # Update the issue with the new label
           UPDATE_RESPONSE=$(curl -s -X POST \
@@ -96,8 +99,6 @@ jobs:
             -H "Authorization: $LINEAR_API_KEY" \
             -d "$QUERY" \
             https://api.linear.app/graphql)
-
-          echo "Update response: $UPDATE_RESPONSE"
 
           SUCCESS=$(echo "$UPDATE_RESPONSE" | jq -r '.data.issueUpdate.success')
 

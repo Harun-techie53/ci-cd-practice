@@ -7,3 +7,5 @@ console.log("Github CI/CD setup is done")
 console.log("PRE-7 is done")
 
 console.log("Changed something")
+
+console.log("Test 3")
