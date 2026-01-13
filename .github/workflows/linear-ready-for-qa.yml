@@ -18,8 +18,17 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
+<<<<<<< Updated upstream
+          # Try to extract ticket ID from branch name (e.g., feature/ABC-123-description or ABC-123-description)
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          # Pattern matches common Linear ticket formats (e.g., ABC-123, TEAM-456)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oE '[A-Z]{2,10}-[0-9]+' | head -1)
+=======
           # Pattern matches Linear ticket formats case-insensitively (e.g., REP-123, rep-123, Rep-456)
-          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE '[a-z]{2,10}-[0-9]+' | head -1)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'pre-[0-9]+' | head -1)
+>>>>>>> Stashed changes
 
           # If not found in branch name, try PR title
           if [ -z "$TICKET_ID" ]; then
