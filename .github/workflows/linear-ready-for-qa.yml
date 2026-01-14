@@ -1,43 +1,76 @@
-name: Add Ready for QA Label to Linear
+name: Add Ready for QA Label to Linear Ticket
 
 on:
-  pull_request:
-    types: [closed]
-    branches: [main]
+  workflow_call:
+    secrets:
+      LINEAR_API_KEY:
+        required: true
+      GH_TOKEN:
+        required: true
 
 jobs:
   update-linear-ticket:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
     steps:
-      - name: Extract Linear Ticket ID
-        id: extract-ticket
+      - name: Get PR associated with commit
+        id: get-pr
         env:
-          BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-<<<<<<< Updated upstream
-          # Try to extract ticket ID from branch name (e.g., feature/ABC-123-description or ABC-123-description)
-          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-          PR_TITLE="${{ github.event.pull_request.title }}"
+          # Get the head SHA from the current commit
+          HEAD_SHA="${{ github.sha }}"
 
-          # Pattern matches common Linear ticket formats (e.g., ABC-123, TEAM-456)
-          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oE '[A-Z]{2,10}-[0-9]+' | head -1)
-=======
-          # Pattern matches Linear ticket formats case-insensitively (e.g., REP-123, rep-123, Rep-456)
-          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'pre-[0-9]+' | head -1)
->>>>>>> Stashed changes
+          # Find PRs associated with this commit
+          PR_DATA=$(gh api repos/${{ github.repository }}/commits/$HEAD_SHA/pulls --jq '.[0] | {number, title, body, head_ref: .head.ref, merged: .merged}')
+
+          if [ -z "$PR_DATA" ] || [ "$PR_DATA" == "null" ]; then
+            echo "No PR found for commit $HEAD_SHA"
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
+          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+          PR_BODY=$(echo "$PR_DATA" | jq -r '.body')
+          BRANCH_NAME=$(echo "$PR_DATA" | jq -r '.head_ref')
+          PR_MERGED=$(echo "$PR_DATA" | jq -r '.merged')
+
+          echo "Found PR #$PR_NUMBER from branch: $BRANCH_NAME"
+
+          if [ "$PR_MERGED" != "true" ]; then
+            echo "PR was not merged, skipping"
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+
+          # Store PR body in a file to handle multiline content
+          echo "$PR_BODY" > /tmp/pr_body.txt
+
+      - name: Extract Linear Ticket ID
+        if: steps.get-pr.outputs.found == 'true'
+        id: extract-ticket
+        run: |
+          BRANCH_NAME="${{ steps.get-pr.outputs.branch_name }}"
+          PR_TITLE="${{ steps.get-pr.outputs.pr_title }}"
+          PR_BODY=$(cat /tmp/pr_body.txt 2>/dev/null || echo "")
+
+          # Pattern matches Linear ticket formats case-insensitively (e.g., REP-123, rep-123, Rep-123)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'rep-[0-9]+' | head -1)
 
           # If not found in branch name, try PR title
           if [ -z "$TICKET_ID" ]; then
-            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE '[a-z]{2,10}-[0-9]+' | head -1)
+            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE 'rep-[0-9]+' | head -1)
           fi
 
-          # If not found in PR title, try PR description/body
+          # If not found in PR title, try PR description
           if [ -z "$TICKET_ID" ]; then
-            TICKET_ID=$(echo "$PR_BODY" | grep -oiE '[a-z]{2,10}-[0-9]+' | head -1)
+            TICKET_ID=$(echo "$PR_BODY" | grep -oiE 'rep-[0-9]+' | head -1)
           fi
 
           if [ -z "$TICKET_ID" ]; then
@@ -64,7 +97,12 @@ jobs:
             -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id team { labels { nodes { id name } } } labels { nodes { id name } } } }\"}" \
             https://api.linear.app/graphql)
 
-          # Extract issue UUID
+          if [ -z "$ISSUE_RESPONSE" ]; then
+            echo "Linear API request failed"
+            exit 1
+          fi
+
+          # Extract issue ID
           ISSUE_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.id')
 
           if [ "$ISSUE_ID" == "null" ] || [ -z "$ISSUE_ID" ]; then
@@ -114,6 +152,6 @@ jobs:
           if [ "$SUCCESS" == "true" ]; then
             echo "Successfully added 'Ready for QA' label to $TICKET_ID"
           else
-            echo "Failed to update issue"
+            echo "Failed to update issue. Response: $UPDATE_RESPONSE"
             exit 1
           fi
