@@ -25,6 +25,24 @@ jobs:
             exit 1
           else
             echo "GH_TOKEN is set (length: ${#GH_TOKEN} chars)"
+            echo "Token prefix: ${GH_TOKEN:0:4}..."
+          fi
+
+          # Test token with curl directly
+          echo "Testing token with GitHub API..."
+          HTTP_CODE=$(curl -s -o /tmp/gh_response.json -w "%{http_code}" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user)
+
+          echo "HTTP Status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Token validation failed. Response:"
+            cat /tmp/gh_response.json
+            exit 1
+          else
+            echo "Token is valid!"
+            cat /tmp/gh_response.json | jq '{login, id}'
           fi
 
       - name: Get PR associated with commit
