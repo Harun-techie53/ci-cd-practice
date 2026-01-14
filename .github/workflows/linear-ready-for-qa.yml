@@ -50,31 +50,40 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          # Get the head SHA from the current commit
           HEAD_SHA="${{ github.sha }}"
+          echo "Looking for PR associated with commit: $HEAD_SHA"
 
-          # Find PRs associated with this commit
-          PR_DATA=$(gh api repos/${{ github.repository }}/commits/$HEAD_SHA/pulls --jq '.[0] | {number, title, body, head_ref: .head.ref, merged: .merged}')
+          # Method 1: Try to extract PR number from merge commit message
+          # Merge commits typically have format: "Merge pull request #123 from branch"
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $COMMIT_MSG"
 
-          if [ -z "$PR_DATA" ] || [ "$PR_DATA" == "null" ]; then
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+
+          if [ -z "$PR_NUMBER" ]; then
+            # Method 2: Search for merged PRs with this merge commit SHA
+            echo "No PR number in commit message, searching merged PRs..."
+            PR_NUMBER=$(gh pr list --state merged --base main --json number,mergeCommit --jq ".[] | select(.mergeCommit.oid == \"$HEAD_SHA\") | .number" | head -1)
+          fi
+
+          if [ -z "$PR_NUMBER" ]; then
             echo "No PR found for commit $HEAD_SHA"
             echo "found=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
+          echo "Found PR #$PR_NUMBER"
+
+          # Get full PR details
+          PR_DATA=$(gh pr view "$PR_NUMBER" --json title,body,headRefName,state)
           PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
           PR_BODY=$(echo "$PR_DATA" | jq -r '.body')
-          BRANCH_NAME=$(echo "$PR_DATA" | jq -r '.head_ref')
-          PR_MERGED=$(echo "$PR_DATA" | jq -r '.merged')
+          BRANCH_NAME=$(echo "$PR_DATA" | jq -r '.headRefName')
+          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
 
-          echo "Found PR #$PR_NUMBER from branch: $BRANCH_NAME"
-
-          if [ "$PR_MERGED" != "true" ]; then
-            echo "PR was not merged, skipping"
-            echo "found=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          echo "PR Title: $PR_TITLE"
+          echo "Branch: $BRANCH_NAME"
+          echo "State: $PR_STATE"
 
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
