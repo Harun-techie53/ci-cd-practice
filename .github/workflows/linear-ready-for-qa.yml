@@ -53,7 +53,6 @@ jobs:
           HEAD_SHA="${{ github.sha }}"
           echo "Looking for PR associated with commit: $HEAD_SHA"
 
-          # Method 1: Try to extract PR number from merge commit message
           # Merge commits typically have format: "Merge pull request #123 from branch"
           COMMIT_MSG=$(git log -1 --pretty=%B)
           echo "Commit message: $COMMIT_MSG"
@@ -61,7 +60,6 @@ jobs:
           PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
 
           if [ -z "$PR_NUMBER" ]; then
-            # Method 2: Search for merged PRs with this merge commit SHA
             echo "No PR number in commit message, searching merged PRs..."
             PR_NUMBER=$(gh pr list --state merged --base main --json number,mergeCommit --jq ".[] | select(.mergeCommit.oid == \"$HEAD_SHA\") | .number" | head -1)
           fi
@@ -102,16 +100,16 @@ jobs:
           PR_BODY=$(cat /tmp/pr_body.txt 2>/dev/null || echo "")
 
           # Pattern matches Linear ticket formats case-insensitively (e.g., REP-123, rep-123, Rep-123)
-          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'rep-[0-9]+' | head -1)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'pre-[0-9]+' | head -1)
 
           # If not found in branch name, try PR title
           if [ -z "$TICKET_ID" ]; then
-            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE 'rep-[0-9]+' | head -1)
+            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE 'pre-[0-9]+' | head -1)
           fi
 
           # If not found in PR title, try PR description
           if [ -z "$TICKET_ID" ]; then
-            TICKET_ID=$(echo "$PR_BODY" | grep -oiE 'rep-[0-9]+' | head -1)
+            TICKET_ID=$(echo "$PR_BODY" | grep -oiE 'pre-[0-9]+' | head -1)
           fi
 
           if [ -z "$TICKET_ID" ]; then
