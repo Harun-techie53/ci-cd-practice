@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Debug token
         env:
@@ -94,11 +96,11 @@ jobs:
           PR_BODY=$(cat /tmp/pr_body.txt 2>/dev/null || echo "")
 
           # Pattern matches Linear ticket formats case-insensitively (e.g., REP-123, rep-123, Rep-123)
-          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'rep-[0-9]+' | head -1)
+          TICKET_ID=$(echo "$BRANCH_NAME" | grep -oiE 'pre-[0-9]+' | head -1)
 
           # If not found in branch name, try PR title
           if [ -z "$TICKET_ID" ]; then
-            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE 'rep-[0-9]+' | head -1)
+            TICKET_ID=$(echo "$PR_TITLE" | grep -oiE 'pre-[0-9]+' | head -1)
           fi
 
           # If not found in PR title, try PR description
