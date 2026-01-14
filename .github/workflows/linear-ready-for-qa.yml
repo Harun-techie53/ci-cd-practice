@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Debug token
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -47,35 +50,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          HEAD_SHA="${{ github.sha }}"
-          echo "Looking for PR associated with commit: $HEAD_SHA"
+          echo "Looking for PR associated with commit: ${{ github.sha }}"
 
-          # Merge commits typically have format: "Merge pull request #123 from branch"
-          COMMIT_MSG=$(git log -1 --pretty=%B)
-          echo "Commit message: $COMMIT_MSG"
+          PR_RESPONSE=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/pulls")
 
-          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+          # Check if we got any PRs (response is an array)
+          PR_COUNT=$(echo "$PR_RESPONSE" | jq 'length')
 
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No PR number in commit message, searching merged PRs..."
-            PR_NUMBER=$(gh pr list --state merged --base main --json number,mergeCommit --jq ".[] | select(.mergeCommit.oid == \"$HEAD_SHA\") | .number" | head -1)
-          fi
-
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No PR found for commit $HEAD_SHA"
+          if [ "$PR_COUNT" -eq 0 ] || [ "$PR_COUNT" == "null" ]; then
+            echo "No PR found for commit ${{ github.sha }}"
             echo "found=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # Get the first PR from the response
+          PR_NUMBER=$(echo "$PR_RESPONSE" | jq -r '.[0].number')
+          PR_TITLE=$(echo "$PR_RESPONSE" | jq -r '.[0].title')
+          PR_BODY=$(echo "$PR_RESPONSE" | jq -r '.[0].body')
+          BRANCH_NAME=$(echo "$PR_RESPONSE" | jq -r '.[0].head.ref')
+          PR_STATE=$(echo "$PR_RESPONSE" | jq -r '.[0].state')
+
           echo "Found PR #$PR_NUMBER"
-
-          # Get full PR details
-          PR_DATA=$(gh pr view "$PR_NUMBER" --json title,body,headRefName,state)
-          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
-          PR_BODY=$(echo "$PR_DATA" | jq -r '.body')
-          BRANCH_NAME=$(echo "$PR_DATA" | jq -r '.headRefName')
-          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
-
           echo "PR Title: $PR_TITLE"
           echo "Branch: $BRANCH_NAME"
           echo "State: $PR_STATE"
