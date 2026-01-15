@@ -206,3 +206,84 @@ jobs:
             echo "Failed to update issue. Response: $UPDATE_RESPONSE"
             exit 1
           fi
+
+      - name: Check and Update Parent Issue
+        if: steps.extract-ticket.outputs.found == 'true'
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          TICKET_ID: ${{ steps.extract-ticket.outputs.ticket_id }}
+        run: |
+          # Get the current issue with its parent and parent's children
+          PARENT_RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id parent { id identifier team { labels { nodes { id name } } } labels { nodes { id name } } children { nodes { id identifier state { name type } } } } } }\"}" \
+            https://api.linear.app/graphql)
+
+          # Check if issue has a parent
+          PARENT_ID=$(echo "$PARENT_RESPONSE" | jq -r '.data.issue.parent.id')
+
+          if [ "$PARENT_ID" == "null" ] || [ -z "$PARENT_ID" ]; then
+            echo "No parent issue found for $TICKET_ID - skipping parent update"
+            exit 0
+          fi
+
+          PARENT_IDENTIFIER=$(echo "$PARENT_RESPONSE" | jq -r '.data.issue.parent.identifier')
+          echo "Found parent issue: $PARENT_IDENTIFIER"
+
+          # Check if all children are in a completed state
+          # Linear state types: backlog, unstarted, started, completed, canceled
+          INCOMPLETE_COUNT=$(echo "$PARENT_RESPONSE" | jq '[.data.issue.parent.children.nodes[] | select(.state.type != "completed" and .state.type != "canceled")] | length')
+
+          echo "Number of incomplete sub-issues: $INCOMPLETE_COUNT"
+
+          if [ "$INCOMPLETE_COUNT" -gt 0 ]; then
+            echo "Not all sub-issues are completed - skipping parent update"
+            echo "Incomplete sub-issues:"
+            echo "$PARENT_RESPONSE" | jq -r '.data.issue.parent.children.nodes[] | select(.state.type != "completed" and .state.type != "canceled") | "  - \(.identifier): \(.state.name)"'
+            exit 0
+          fi
+
+          echo "All sub-issues are completed! Adding 'Ready for QA' to parent issue."
+
+          # Check if parent already has "Ready for QA" label
+          HAS_LABEL=$(echo "$PARENT_RESPONSE" | jq -r '.data.issue.parent.labels.nodes[] | select(.name == "Ready for QA") | .id')
+
+          if [ -n "$HAS_LABEL" ] && [ "$HAS_LABEL" != "null" ]; then
+            echo "Parent issue already has 'Ready for QA' label"
+            exit 0
+          fi
+
+          # Get the "Ready for QA" label ID from parent's team
+          LABEL_ID=$(echo "$PARENT_RESPONSE" | jq -r '.data.issue.parent.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
+
+          if [ -z "$LABEL_ID" ] || [ "$LABEL_ID" == "null" ]; then
+            echo "Label 'Ready for QA' not found in parent's team"
+            exit 1
+          fi
+
+          # Get current parent label IDs and add the new one
+          ALL_LABELS=$(echo "$PARENT_RESPONSE" | jq -c "[.data.issue.parent.labels.nodes[].id] + [\"$LABEL_ID\"] | unique")
+
+          echo "Updating parent issue with labels: $ALL_LABELS"
+
+          # Update the parent issue
+          QUERY=$(jq -n \
+            --arg issueId "$PARENT_ID" \
+            --argjson labelIds "$ALL_LABELS" \
+            '{query: "mutation UpdateIssue($issueId: String!, $labelIds: [String!]) { issueUpdate(id: $issueId, input: { labelIds: $labelIds }) { success issue { id identifier labels { nodes { name } } } } }", variables: {issueId: $issueId, labelIds: $labelIds}}')
+
+          UPDATE_RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "$QUERY" \
+            https://api.linear.app/graphql)
+
+          SUCCESS=$(echo "$UPDATE_RESPONSE" | jq -r '.data.issueUpdate.success')
+
+          if [ "$SUCCESS" == "true" ]; then
+            echo "Successfully added 'Ready for QA' label to parent issue $PARENT_IDENTIFIER"
+          else
+            echo "Failed to update parent issue. Response: $UPDATE_RESPONSE"
+            exit 1
+          fi
