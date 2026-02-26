@@ -135,17 +135,26 @@ jobs:
             echo "found=true" >> $GITHUB_OUTPUT
           fi
 
+          # Check if branch name contains "final" as a word
+          if echo "$BRANCH_NAME" | grep -qiw 'final'; then
+            echo "Branch contains 'final' — will update parent issue"
+            echo "is_final=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_final=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Add Ready for QA Label
         if: steps.extract-ticket.outputs.found == 'true'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           TICKET_ID: ${{ steps.extract-ticket.outputs.ticket_id }}
+          IS_FINAL: ${{ steps.extract-ticket.outputs.is_final }}
         run: |
           # First, get the issue ID from the ticket identifier
           ISSUE_RESPONSE=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id title description team { labels { nodes { id name } } } labels { nodes { id name } } } }\"}" \
+            -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id title description team { labels { nodes { id name } } states { nodes { id name } } } labels { nodes { id name } } parent { id identifier labels { nodes { id name } } team { labels { nodes { id name } } states { nodes { id name } } } } } }\"}" \
             https://api.linear.app/graphql)
 
           if [ -z "$ISSUE_RESPONSE" ]; then
@@ -163,55 +172,113 @@ jobs:
 
           echo "Found issue ID: $ISSUE_ID"
 
-          # Check if [no-qa-needed] is in the issue title or description
+          # Check if [no-qa] or [no-qa-needed] is in the issue title or description
           ISSUE_TITLE=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.title // ""')
           ISSUE_DESCRIPTION=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.description // ""')
 
-          if echo "$ISSUE_TITLE" | grep -qi '\[no-qa-needed\]' || echo "$ISSUE_DESCRIPTION" | grep -qi '\[no-qa-needed\]'; then
-            echo "Skipping 'Ready for QA' label — issue contains [no-qa-needed]"
-            exit 0
+          SKIP_CHILD_QA_LABEL=false
+          if printf '%s' "$ISSUE_TITLE" | grep -qiE '\[no-qa(-needed)?\]' || printf '%s' "$ISSUE_DESCRIPTION" | grep -qiE '\[no-qa(-needed)?\]'; then
+            echo "Skipping 'Ready for QA' label — issue contains [no-qa] or [no-qa-needed]"
+            SKIP_CHILD_QA_LABEL=true
           fi
 
-          # Check if "Ready for QA" label exists in the team
-          LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
+          # Add "Ready for QA" label to child issue unless skipped
+          if [ "$SKIP_CHILD_QA_LABEL" == "false" ]; then
+            # Find "Ready for QA" label in the child's team
+            LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
 
-          if [ -z "$LABEL_ID" ] || [ "$LABEL_ID" == "null" ]; then
-            echo "Label 'Ready for QA' not found in team"
-            exit 1
+            if [ -z "$LABEL_ID" ] || [ "$LABEL_ID" == "null" ]; then
+              echo "Label 'Ready for QA' not found in child team"
+              exit 1
+            fi
+
+            echo "Found child label ID: $LABEL_ID"
+
+            # Add new label to existing labels (unique handles empty arrays)
+            ALL_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c --arg labelId "$LABEL_ID" '[.data.issue.labels.nodes[].id] + [$labelId] | unique')
+
+            echo "Updating issue with labels: $ALL_LABELS"
+
+            # Build the GraphQL query with proper JSON escaping using jq
+            QUERY=$(jq -n \
+              --arg issueId "$ISSUE_ID" \
+              --argjson labelIds "$ALL_LABELS" \
+              '{query: "mutation UpdateIssue($issueId: String!, $labelIds: [String!]) { issueUpdate(id: $issueId, input: { labelIds: $labelIds }) { success issue { id identifier labels { nodes { name } } } } }", variables: {issueId: $issueId, labelIds: $labelIds}}')
+
+            # Update the issue with the new label
+            UPDATE_RESPONSE=$(curl -s -X POST \
+              -H "Content-Type: application/json" \
+              -H "Authorization: $LINEAR_API_KEY" \
+              -d "$QUERY" \
+              https://api.linear.app/graphql)
+
+            SUCCESS=$(echo "$UPDATE_RESPONSE" | jq -r '.data.issueUpdate.success')
+
+            if [ "$SUCCESS" == "true" ]; then
+              echo "Successfully added 'Ready for QA' label to $TICKET_ID"
+            else
+              echo "Failed to update issue. Response: $UPDATE_RESPONSE"
+              exit 1
+            fi
           fi
 
-          echo "Found label ID: $LABEL_ID"
+          # If branch contains "final", update parent issue with "Ready for QA" label and "Done" state
+          if [ "$IS_FINAL" == "true" ]; then
+            PARENT_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.id // ""')
+            PARENT_IDENTIFIER=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.identifier // ""')
 
-          # Get current label IDs
-          CURRENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -r '[.data.issue.labels.nodes[].id] | join(",")')
+            if [ -z "$PARENT_ID" ] || [ "$PARENT_ID" == "null" ]; then
+              echo "No parent issue found — skipping parent update"
+            else
+              echo "Updating parent issue: $PARENT_IDENTIFIER"
 
-          # Add new label to existing labels
-          if [ -z "$CURRENT_LABELS" ]; then
-            ALL_LABELS="[\"$LABEL_ID\"]"
-          else
-            ALL_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c "[.data.issue.labels.nodes[].id] + [\"$LABEL_ID\"] | unique")
-          fi
+              # Build parent label IDs (existing + Ready for QA)
+              # Find "Ready for QA" label in the parent's team
+              PARENT_LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
 
-          echo "Updating issue with labels: $ALL_LABELS"
+              if [ -z "$PARENT_LABEL_ID" ] || [ "$PARENT_LABEL_ID" == "null" ]; then
+                echo "Warning: Label 'Ready for QA' not found in parent team — keeping existing parent labels"
+                PARENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c '[.data.issue.parent.labels.nodes[].id] | unique')
+              else
+                echo "Found parent label ID: $PARENT_LABEL_ID"
+                PARENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c --arg labelId "$PARENT_LABEL_ID" '[.data.issue.parent.labels.nodes[].id] + [$labelId] | unique')
+              fi
 
-          # Build the GraphQL query with proper JSON escaping using jq
-          QUERY=$(jq -n \
-            --arg issueId "$ISSUE_ID" \
-            --argjson labelIds "$ALL_LABELS" \
-            '{query: "mutation UpdateIssue($issueId: String!, $labelIds: [String!]) { issueUpdate(id: $issueId, input: { labelIds: $labelIds }) { success issue { id identifier labels { nodes { name } } } } }", variables: {issueId: $issueId, labelIds: $labelIds}}')
+              # Find "Done" state ID from parent's team
+              DONE_STATE_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.team.states.nodes[] | select(.name == "Done") | .id')
 
-          # Update the issue with the new label
-          UPDATE_RESPONSE=$(curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -H "Authorization: $LINEAR_API_KEY" \
-            -d "$QUERY" \
-            https://api.linear.app/graphql)
+              if [ -z "$DONE_STATE_ID" ] || [ "$DONE_STATE_ID" == "null" ]; then
+                echo "Warning: State 'Done' not found in parent's team — will add label only"
+                PARENT_QUERY=$(jq -n \
+                  --arg issueId "$PARENT_ID" \
+                  --argjson labelIds "$PARENT_LABELS" \
+                  '{query: "mutation UpdateParent($issueId: String!, $labelIds: [String!]) { issueUpdate(id: $issueId, input: { labelIds: $labelIds }) { success issue { id identifier labels { nodes { name } } } } }", variables: {issueId: $issueId, labelIds: $labelIds}}')
+              else
+                echo "Found 'Done' state ID: $DONE_STATE_ID"
+                PARENT_QUERY=$(jq -n \
+                  --arg issueId "$PARENT_ID" \
+                  --argjson labelIds "$PARENT_LABELS" \
+                  --arg stateId "$DONE_STATE_ID" \
+                  '{query: "mutation UpdateParent($issueId: String!, $labelIds: [String!], $stateId: String!) { issueUpdate(id: $issueId, input: { labelIds: $labelIds, stateId: $stateId }) { success issue { id identifier labels { nodes { name } } state { name } } } }", variables: {issueId: $issueId, labelIds: $labelIds, stateId: $stateId}}')
+              fi
 
-          SUCCESS=$(echo "$UPDATE_RESPONSE" | jq -r '.data.issueUpdate.success')
+              PARENT_RESPONSE=$(curl -s -X POST \
+                -H "Content-Type: application/json" \
+                -H "Authorization: $LINEAR_API_KEY" \
+                -d "$PARENT_QUERY" \
+                https://api.linear.app/graphql)
 
-          if [ "$SUCCESS" == "true" ]; then
-            echo "Successfully added 'Ready for QA' label to $TICKET_ID"
-          else
-            echo "Failed to update issue. Response: $UPDATE_RESPONSE"
-            exit 1
+              PARENT_SUCCESS=$(echo "$PARENT_RESPONSE" | jq -r '.data.issueUpdate.success')
+
+              if [ "$PARENT_SUCCESS" == "true" ]; then
+                if [ -n "$DONE_STATE_ID" ] && [ "$DONE_STATE_ID" != "null" ]; then
+                  echo "Successfully updated parent issue $PARENT_IDENTIFIER with 'Ready for QA' label and 'Done' state"
+                else
+                  echo "Successfully updated parent issue $PARENT_IDENTIFIER with 'Ready for QA' label"
+                fi
+              else
+                echo "Failed to update parent issue (child issue $TICKET_ID was updated successfully). Response: $PARENT_RESPONSE"
+                exit 1
+              fi
+            fi
           fi
