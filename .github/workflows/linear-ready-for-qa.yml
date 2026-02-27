@@ -154,7 +154,7 @@ jobs:
           ISSUE_RESPONSE=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id title description team { labels { nodes { id name } } states { nodes { id name } } } labels { nodes { id name } } parent { id identifier labels { nodes { id name } } team { labels { nodes { id name } } states { nodes { id name } } } } } }\"}" \
+            -d "{\"query\": \"query { issue(id: \\\"$TICKET_ID\\\") { id title description team { labels { nodes { id name } } states { nodes { id name } } } labels { nodes { id name } } parent { id identifier title description labels { nodes { id name } } team { labels { nodes { id name } } states { nodes { id name } } } } } }\"}" \
             https://api.linear.app/graphql)
 
           if [ -z "$ISSUE_RESPONSE" ]; then
@@ -232,16 +232,30 @@ jobs:
             else
               echo "Updating parent issue: $PARENT_IDENTIFIER"
 
-              # Build parent label IDs (existing + Ready for QA)
-              # Find "Ready for QA" label in the parent's team
-              PARENT_LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
+              # Check if parent issue has [no-qa] or [no-qa-needed] in title or description
+              PARENT_TITLE=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.title // ""')
+              PARENT_DESCRIPTION=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.description // ""')
 
-              if [ -z "$PARENT_LABEL_ID" ] || [ "$PARENT_LABEL_ID" == "null" ]; then
-                echo "Warning: Label 'Ready for QA' not found in parent team — keeping existing parent labels"
+              SKIP_PARENT_QA_LABEL=false
+              if printf '%s' "$PARENT_TITLE" | grep -qiE '\[no-qa(-needed)?\]' || printf '%s' "$PARENT_DESCRIPTION" | grep -qiE '\[no-qa(-needed)?\]'; then
+                echo "Skipping 'Ready for QA' label on parent — parent issue contains [no-qa] or [no-qa-needed]"
+                SKIP_PARENT_QA_LABEL=true
+              fi
+
+              # Build parent label IDs
+              if [ "$SKIP_PARENT_QA_LABEL" == "true" ]; then
                 PARENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c '[.data.issue.parent.labels.nodes[].id] | unique')
               else
-                echo "Found parent label ID: $PARENT_LABEL_ID"
-                PARENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c --arg labelId "$PARENT_LABEL_ID" '[.data.issue.parent.labels.nodes[].id] + [$labelId] | unique')
+                # Find "Ready for QA" label in the parent's team
+                PARENT_LABEL_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.data.issue.parent.team.labels.nodes[] | select(.name == "Ready for QA") | .id')
+
+                if [ -z "$PARENT_LABEL_ID" ] || [ "$PARENT_LABEL_ID" == "null" ]; then
+                  echo "Warning: Label 'Ready for QA' not found in parent team — keeping existing parent labels"
+                  PARENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c '[.data.issue.parent.labels.nodes[].id] | unique')
+                else
+                  echo "Found parent label ID: $PARENT_LABEL_ID"
+                  PARENT_LABELS=$(echo "$ISSUE_RESPONSE" | jq -c --arg labelId "$PARENT_LABEL_ID" '[.data.issue.parent.labels.nodes[].id] + [$labelId] | unique')
+                fi
               fi
 
               # Find "Done" state ID from parent's team
@@ -271,8 +285,12 @@ jobs:
               PARENT_SUCCESS=$(echo "$PARENT_RESPONSE" | jq -r '.data.issueUpdate.success')
 
               if [ "$PARENT_SUCCESS" == "true" ]; then
-                if [ -n "$DONE_STATE_ID" ] && [ "$DONE_STATE_ID" != "null" ]; then
+                if [ -n "$DONE_STATE_ID" ] && [ "$DONE_STATE_ID" != "null" ] && [ "$SKIP_PARENT_QA_LABEL" == "false" ]; then
                   echo "Successfully updated parent issue $PARENT_IDENTIFIER with 'Ready for QA' label and 'Done' state"
+                elif [ -n "$DONE_STATE_ID" ] && [ "$DONE_STATE_ID" != "null" ] && [ "$SKIP_PARENT_QA_LABEL" == "true" ]; then
+                  echo "Successfully updated parent issue $PARENT_IDENTIFIER with 'Done' state (skipped 'Ready for QA' — parent contains [no-qa-needed])"
+                elif [ "$SKIP_PARENT_QA_LABEL" == "true" ]; then
+                  echo "No changes needed for parent issue $PARENT_IDENTIFIER (skipped 'Ready for QA' — parent contains [no-qa-needed])"
                 else
                   echo "Successfully updated parent issue $PARENT_IDENTIFIER with 'Ready for QA' label"
                 fi
