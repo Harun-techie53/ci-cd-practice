@@ -33,7 +33,7 @@ runs:
         echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
 
     - name: Send Slack Notification
-      uses: slackapi/slack-github-action@v2.0.0
+      uses: slackapi/slack-github-action@v3.0.1
       with:
         webhook-type: incoming-webhook
         webhook: ${{ inputs.WEBHOOK_URL }}
