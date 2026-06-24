@@ -15,6 +15,9 @@ jobs:
     needs: update-linear
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
