@@ -21,8 +21,6 @@ jobs:
 
       - name: Notify Slack
         uses: ./.github/actions/slack-notify
-        secrets:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         with:
           STATUS: ${{ needs.update-linear.result }}
           WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
