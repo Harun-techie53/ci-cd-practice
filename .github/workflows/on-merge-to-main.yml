@@ -10,3 +10,20 @@ jobs:
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  notify:
+    needs: update-linear
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notify Slack
+        uses: ./.github/actions/slack-notify
+        with:
+          STATUS: ${{ needs.update-linear.result }}
+          WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ENVIRONMENT: production
+          WORKFLOW_NAME: ${{ github.workflow }}

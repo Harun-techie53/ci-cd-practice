@@ -1,0 +1,62 @@
+name: "Slack Notification Action"
+description: "Send notifications to Slack about GitHub events"
+
+inputs:
+  STATUS:
+    description: "Status of the workflow"
+    required: true
+  WEBHOOK_URL:
+    description: "Slack webhook URL"
+    required: true
+  ENVIRONMENT:
+    description: "Deployment environment"
+    required: true
+  WORKFLOW_NAME:
+    description: "Name of the workflow"
+    required: false
+    default: "Deployment"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Gather PR context
+      id: pr
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_URL: ${{ github.event.pull_request.html_url }}
+      run: |
+        echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+        echo "title=${PR_TITLE}" >> "$GITHUB_OUTPUT"
+        echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+        echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+    - name: Send Slack Notification
+      uses: slackapi/slack-github-action@v2.0.0
+      with:
+        webhook-type: incoming-webhook
+        webhook: ${{ inputs.WEBHOOK_URL }}
+        payload: |
+          {
+            "text": "${{ inputs.STATUS == 'failure' && '<!here>' || '' }}",
+            "attachments": [
+              {
+                "color": "${{ inputs.STATUS == 'success' && '#36a64f' || '#ff0000' }}",
+                "title": "#${{ steps.pr.outputs.number }} ${{ steps.pr.outputs.title }}",
+                "title_link": "${{ steps.pr.outputs.url }}",
+                "text": "*Workflow:* ${{ inputs.WORKFLOW_NAME }}\n*Environment:* ${{ inputs.ENVIRONMENT }}",
+                "mrkdwn_in": ["text"],
+                "actions": [
+                  {
+                    "type": "button",
+                    "text": "View on GitHub",
+                    "url": "${{ steps.pr.outputs.url }}",
+                    "style": "${{ inputs.STATUS == 'success' && 'primary' || 'danger' }}"
+                  }
+                ],
+                "footer": "GitHub Actions",
+                "ts": "${{ steps.pr.outputs.ts }}"
+              }
+            ]
+          }
