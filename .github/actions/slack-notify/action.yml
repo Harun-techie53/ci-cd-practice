@@ -19,17 +19,30 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Gather PR context
-      id: pr
+    - name: Gather deployment context
+      id: ctx
       shell: bash
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_URL: ${{ github.event.pull_request.html_url }}
+        COMMIT_SHA: ${{ github.sha }}
+        COMMIT_MSG: ${{ github.event.head_commit.message }}
+        SERVER_URL: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
       run: |
-        echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-        echo "title=${PR_TITLE}" >> "$GITHUB_OUTPUT"
-        echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+        if [ -n "${PR_NUMBER}" ]; then
+          # PR-triggered (e.g. feature deployments)
+          echo "title=#${PR_NUMBER} ${PR_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+        else
+          # Push-triggered (e.g. staging/production) — fall back to commit info
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          # First line of the commit message only
+          SUBJECT="$(printf '%s' "${COMMIT_MSG}" | head -n1)"
+          echo "title=${SHORT_SHA} ${SUBJECT}" >> "$GITHUB_OUTPUT"
+          echo "url=${SERVER_URL}/${REPO}/commit/${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+        fi
         echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
 
     - name: Send Slack Notification
@@ -43,20 +56,20 @@ runs:
             "attachments": [
               {
                 "color": "${{ inputs.STATUS == 'success' && '#36a64f' || '#ff0000' }}",
-                "title": "#${{ steps.pr.outputs.number }} ${{ steps.pr.outputs.title }}",
-                "title_link": "${{ steps.pr.outputs.url }}",
+                "title": "${{ steps.ctx.outputs.title }}",
+                "title_link": "${{ steps.ctx.outputs.url }}",
                 "text": "*Workflow:* ${{ inputs.WORKFLOW_NAME }}\n*Environment:* ${{ inputs.ENVIRONMENT }}",
                 "mrkdwn_in": ["text"],
                 "actions": [
                   {
                     "type": "button",
                     "text": "View on GitHub",
-                    "url": "${{ steps.pr.outputs.url }}",
+                    "url": "${{ steps.ctx.outputs.url }}",
                     "style": "${{ inputs.STATUS == 'success' && 'primary' || 'danger' }}"
                   }
                 ],
                 "footer": "GitHub Actions",
-                "ts": "${{ steps.pr.outputs.ts }}"
+                "ts": "${{ steps.ctx.outputs.ts }}"
               }
             ]
           }
